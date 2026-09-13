@@ -25,6 +25,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
   const [awsData, setAwsData] = useState({ profile: "", region: "", accessKeyId: "", sessionToken: "" });
   const [clearAwsSessionToken, setClearAwsSessionToken] = useState(false);
   const [region, setRegion] = useState("");
+  const [imageBackend, setImageBackend] = useState("images");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [validating, setValidating] = useState(false);
@@ -66,6 +67,11 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
         const savedRegion = connection.providerSpecificData?.region || providerCfg.defaultRegion || providerCfg.regions[0]?.id || "";
         setRegion(savedRegion);
       }
+      if (providerCfg?.imageConfig?.backendOptions) {
+        setImageBackend(connection.providerSpecificData?.imageBackend || providerCfg.imageConfig.defaultBackend || "images");
+      } else {
+        setImageBackend("images");
+      }
       setTestResult(null);
       setValidationResult(null);
     }
@@ -79,11 +85,15 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
     ? (isOpenAICompatibleProvider(connection.provider) || isAnthropicCompatibleProvider(connection.provider))
     : false;
   const providerRegions = connection ? (AI_PROVIDERS?.[connection.provider]?.regions || null) : null;
+  const imageBackendConfig = connection ? (AI_PROVIDERS?.[connection.provider]?.imageConfig || null) : null;
+  const imageBackendOptions = imageBackendConfig?.backendOptions || null;
 
-  // Build providerSpecificData for region-aware providers
-  const buildRegionSpecificData = () => {
-    if (providerRegions && region) return { ...((connection?.providerSpecificData) || {}), region };
-    return undefined;
+  // Preserve existing provider-specific fields when changing a connection option.
+  const buildConnectionProviderSpecificData = () => {
+    const data = { ...(connection?.providerSpecificData || {}) };
+    if (providerRegions && region) data.region = region;
+    if (imageBackendOptions && imageBackend) data.imageBackend = imageBackend;
+    return data;
   };
 
   // The server keeps a saved session token when this password field is blank. Other empty
@@ -124,7 +134,9 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
           ...(isAzure ? { providerSpecificData: azureData } : {}),
           ...(isCloudflareAi ? { providerSpecificData: cloudflareData } : {}),
           ...(usesAwsCredentialForm ? { providerSpecificData: buildAwsSpecificData() } : {}),
-          ...(providerRegions ? { providerSpecificData: buildRegionSpecificData() } : {}),
+          ...(!isAzure && !isCloudflareAi && (providerRegions || imageBackendOptions)
+            ? { providerSpecificData: buildConnectionProviderSpecificData() }
+            : {}),
         }),
       });
       const data = await res.json();
@@ -160,7 +172,9 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
                 ...(isAzure ? { providerSpecificData: azureData } : {}),
                 ...(isCloudflareAi ? { providerSpecificData: cloudflareData } : {}),
                 ...(usesAwsCredentialForm ? { providerSpecificData: buildAwsSpecificData() } : {}),
-                ...(providerRegions ? { providerSpecificData: buildRegionSpecificData() } : {}),
+                ...(!isAzure && !isCloudflareAi && (providerRegions || imageBackendOptions)
+                  ? { providerSpecificData: buildConnectionProviderSpecificData() }
+                  : {}),
               }),
             });
             const data = await res.json();
@@ -195,8 +209,8 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
         updates.providerSpecificData = buildAwsSpecificData();
       }
       // Persist updated region for region-aware providers
-      if (providerRegions && region) {
-        updates.providerSpecificData = buildRegionSpecificData();
+      if (!isAzure && !isCloudflareAi && (providerRegions || imageBackendOptions)) {
+        updates.providerSpecificData = buildConnectionProviderSpecificData();
       }
       
       await onSave(updates);
@@ -345,6 +359,20 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
             onChange={(e) => setRegion(e.target.value)}
             options={providerRegions.map((r) => ({ value: r.id, label: r.label }))}
           />
+        )}
+
+        {imageBackendOptions && (
+          <>
+            <Select
+              label="Image Backend"
+              value={imageBackend}
+              onChange={(e) => setImageBackend(e.target.value)}
+              options={imageBackendOptions}
+            />
+            <p className="text-xs text-text-muted">
+              Images API uses /v1/images/generations. Responses API calls the image_generation tool via /v1/responses.
+            </p>
+          </>
         )}
 
         {!isCompatible && !isAzure && !isCloudflareAi && (

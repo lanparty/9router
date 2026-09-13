@@ -29,6 +29,9 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
   const apiKeyOptionalWith = AI_PROVIDERS?.[provider]?.apiKeyOptionalWith || null;
   const providerRegions = AI_PROVIDERS?.[provider]?.regions || null;
   const defaultRegion = AI_PROVIDERS?.[provider]?.defaultRegion || providerRegions?.[0]?.id || "";
+  const imageBackendConfig = AI_PROVIDERS?.[provider]?.imageConfig || null;
+  const imageBackendOptions = imageBackendConfig?.backendOptions || null;
+  const defaultImageBackend = imageBackendConfig?.defaultBackend || "images";
 
   const [formData, setFormData] = useState({
     name: "",
@@ -37,6 +40,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     priority: 1,
     proxyPoolId: NONE_PROXY_POOL_VALUE,
     ollamaHostUrl: "",
+    imageBackend: defaultImageBackend,
   });
   const [azureData, setAzureData] = useState({
     azureEndpoint: "",
@@ -66,19 +70,20 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
   const [bulkResult, setBulkResult] = useState(null); // { success, failed }
 
   const buildProviderSpecificData = () => {
+    const data = {};
     if (isOllamaLocal && formData.ollamaHostUrl.trim()) {
-      return { baseUrl: formData.ollamaHostUrl.trim() };
+      data.baseUrl = formData.ollamaHostUrl.trim();
     }
     if (isAzure) {
-      return {
+      Object.assign(data, {
         azureEndpoint: azureData.azureEndpoint,
         apiVersion: azureData.apiVersion,
         deployment: azureData.deployment,
         organization: azureData.organization,
-      };
+      });
     }
     if (isCloudflareAi) {
-      return { accountId: cloudflareData.accountId };
+      data.accountId = cloudflareData.accountId;
     }
     if (usesAwsCredentialForm) {
       // Only send what the user filled in: an empty `profile` would otherwise select profile
@@ -91,9 +96,10 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
       return Object.keys(data).length ? data : undefined;
     }
     if (providerRegions && region) {
-      return { region };
+      data.region = region;
     }
-    return undefined;
+    if (imageBackendOptions && formData.imageBackend) data.imageBackend = formData.imageBackend;
+    return Object.keys(data).length > 0 ? data : undefined;
   };
 
   // One place decides whether the credential requirement is met. The button's disabled state and
@@ -189,7 +195,11 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
           const vres = await fetch("/api/providers/validate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ provider, apiKey: entry.apiKey }),
+            body: JSON.stringify({
+              provider,
+              apiKey: entry.apiKey,
+              providerSpecificData: buildProviderSpecificData(),
+            }),
           });
           const vdata = await vres.json().catch(() => ({}));
           isValid = !!vdata.valid;
@@ -205,7 +215,13 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
             name: entry.name,
             priority: 1,
             testStatus: isValid ? "active" : "unknown",
-            ...(entry.providerSpecificData ? { providerSpecificData: entry.providerSpecificData } : {}),
+            ...(() => {
+              const providerSpecificData = {
+                ...(buildProviderSpecificData() || {}),
+                ...(entry.providerSpecificData || {}),
+              };
+              return Object.keys(providerSpecificData).length > 0 ? { providerSpecificData } : {};
+            })(),
           }),
         });
         if (res.ok) success++;
@@ -231,6 +247,20 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
             <Button size="sm" variant={mode === "single" ? "primary" : "ghost"} onClick={() => { setMode("single"); setBulkResult(null); }}>Single</Button>
             <Button size="sm" variant={mode === "bulk" ? "primary" : "ghost"} onClick={() => { setMode("bulk"); setBulkResult(null); }}>Bulk Add</Button>
           </div>
+        )}
+
+        {imageBackendOptions && (
+          <>
+            <Select
+              label="Image Backend"
+              value={formData.imageBackend}
+              onChange={(e) => setFormData({ ...formData, imageBackend: e.target.value })}
+              options={imageBackendOptions}
+            />
+            <p className="text-xs text-text-muted">
+              Images API uses /v1/images/generations. Responses API calls the image_generation tool via /v1/responses.
+            </p>
+          </>
         )}
 
         {mode === "bulk" && (

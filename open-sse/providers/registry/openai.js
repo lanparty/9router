@@ -88,6 +88,15 @@ export default {
     format: "openai",
   },
   embeddingConfig: { baseUrl: "https://api.openai.com/v1/embeddings", authType: "apikey", authHeader: "bearer" },
-  imageConfig: { baseUrl: "https://api.openai.com/v1/images/generations" },
+  imageConfig: {
+    baseUrl: "https://api.openai.com/v1/images/generations",
+    responsesUrl: "https://api.openai.com/v1/responses",
+    responsesImageModel: "gpt-image-2.5-sunburst",
+    defaultBackend: "images",
+    backendOptions: [
+      { value: "images", label: "Images API" },
+      { value: "responses", label: "Responses API" },
+    ],
+  },
   searchViaChat: { defaultModel: "gpt-4o-mini", pricingUrl: "https://openai.com/api/pricing" },
 };

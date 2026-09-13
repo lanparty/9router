@@ -87,6 +87,97 @@ describe("handleImageGenerationCore", () => {
     expect(responseBody.data[0].url).toBe("https://example.com/image.png");
   });
 
+  it("uses OpenAI Responses image backend when selected on the connection", async () => {
+    global.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      created_at: 1234567890,
+      output: [{ type: "image_generation_call", result: "base64openairesponses" }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    const result = await handleImageGenerationCore({
+      body: { prompt: "A green square", size: "1024x1024", quality: "standard", output_format: "png" },
+      modelInfo: { provider: "openai", model: "gpt-5.6-luna" },
+      credentials: { apiKey: "test-key", providerSpecificData: { imageBackend: "responses" } },
+      log: null,
+    });
+
+    expect(result.success).toBe(true);
+    expect(global.fetch).toHaveBeenCalledWith("https://api.openai.com/v1/responses", expect.objectContaining({
+      method: "POST",
+      headers: expect.objectContaining({ Authorization: "Bearer test-key" }),
+    }));
+    const requestBody = JSON.parse(global.fetch.mock.calls[0][1].body);
+    expect(requestBody).toMatchObject({
+      model: "gpt-5.6-luna",
+      input: "A green square",
+      tool_choice: { type: "image_generation" },
+      tools: [{
+        type: "image_generation",
+        model: "gpt-image-2.5-sunburst",
+        output_format: "png",
+        size: "1024x1024",
+        quality: "medium",
+      }],
+    });
+    const responseBody = await result.response.json();
+    expect(responseBody.data[0].b64_json).toBe("base64openairesponses");
+  });
+
+  it("maps ordered image references to Responses input_image edit input", async () => {
+    global.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      created_at: 1234567891,
+      output: [{ type: "image_generation_call", result: "base64edited" }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    const result = await handleImageGenerationCore({
+      body: {
+        prompt: "Use both product references",
+        images: ["data:image/png;base64,AAA", "https://example.com/b.png"],
+        image_detail: "high",
+      },
+      modelInfo: { provider: "openai", model: "gpt-5.6-luna" },
+      credentials: { apiKey: "test-key", providerSpecificData: { imageBackend: "responses" } },
+      log: null,
+    });
+
+    expect(result.success).toBe(true);
+    const requestBody = JSON.parse(global.fetch.mock.calls[0][1].body);
+    expect(requestBody.tools).toEqual([{ type: "image_generation", model: "gpt-image-2.5-sunburst", action: "edit" }]);
+    expect(requestBody.input[0].content).toEqual([
+      { type: "input_image", image_url: "data:image/png;base64,AAA", detail: "high" },
+      { type: "input_image", image_url: "https://example.com/b.png", detail: "high" },
+      { type: "input_text", text: "Use both product references" },
+    ]);
+  });
+
+  it("rejects more than one image when the Responses backend is selected", async () => {
+    const result = await handleImageGenerationCore({
+      body: { prompt: "Two cats", n: 2 },
+      modelInfo: { provider: "openai", model: "gpt-5.6-luna" },
+      credentials: { apiKey: "test-key", providerSpecificData: { imageBackend: "responses" } },
+      log: null,
+    });
+
+    expect(result).toMatchObject({ success: false, status: 400 });
+    expect(result.error).toContain("supports n=1");
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("turns a text-only Responses image response into a structured failure", async () => {
+    global.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      output: [{ type: "message", content: [{ type: "output_text", text: "I cannot edit that image." }] }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    const result = await handleImageGenerationCore({
+      body: { prompt: "Edit this" },
+      modelInfo: { provider: "openai", model: "gpt-5.6-luna" },
+      credentials: { apiKey: "test-key", providerSpecificData: { imageBackend: "responses" } },
+      log: null,
+    });
+
+    expect(result).toMatchObject({ success: false, status: 502 });
+    expect(result.error).toContain("I cannot edit that image.");
+  });
+
   it("generates image with Gemini format", async () => {
     global.fetch.mockResolvedValueOnce(
       new Response(
