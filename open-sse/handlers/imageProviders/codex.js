@@ -3,6 +3,11 @@ import { randomUUID } from "node:crypto";
 import { nowSec } from "./_base.js";
 import { PROVIDERS } from "../../config/providers.js";
 import { CODEX_CLI_VERSION } from "../../config/appConstants.js";
+import {
+  CODEX_IMAGE_NO_RESULT_ERROR,
+  codexEventError,
+  readCodexEvents,
+} from "../../utils/codexSse.js";
 
 const CODEX_RESPONSES_URL = PROVIDERS["codex"].baseUrl;
 const CODEX_USER_AGENT = `codex_cli_rs/${CODEX_CLI_VERSION}`;
@@ -78,78 +83,60 @@ function normalizeResponsesUsage(raw) {
 }
 
 // Parse Codex SSE stream → final base64 image. Optional callbacks for client streaming.
-async function parseStream(response, log, callbacks = {}) {
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
+async function parseStream(response, log, callbacks = {}, signal) {
   let imageB64 = null;
+  let outputText = "";
   let lastEvent = null;
   let bytesReceived = 0;
   let lastProgressLogMs = 0;
   let usage = null;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    bytesReceived += value?.byteLength || 0;
-    buffer += decoder.decode(value, { stream: true });
+  for await (const frame of readCodexEvents(response, signal)) {
+    const error = codexEventError(frame.event, frame.data);
+    if (error) throw error;
+    const eventName = frame.event;
+    const data = frame.data;
+    bytesReceived = frame.bytesReceived;
+    if (eventName !== lastEvent) {
+      log?.info?.("IMAGE", `codex progress: ${eventName}`);
+      lastEvent = eventName;
+    }
 
-    let sepIdx;
-    while ((sepIdx = buffer.indexOf("\n\n")) !== -1) {
-      const block = buffer.slice(0, sepIdx);
-      buffer = buffer.slice(sepIdx + 2);
+    const now = Date.now();
+    if (callbacks.onProgress && now - lastProgressLogMs > 200) {
+      lastProgressLogMs = now;
+      callbacks.onProgress({ stage: eventName, bytesReceived });
+    }
 
-      const lines = block.split("\n");
-      let eventName = null;
-      let dataStr = "";
-      for (const line of lines) {
-        if (line.startsWith("event:")) eventName = line.slice(6).trim();
-        else if (line.startsWith("data:")) dataStr += line.slice(5).trim();
-      }
-      if (!eventName) continue;
-      if (eventName !== lastEvent) {
-        log?.info?.("IMAGE", `codex progress: ${eventName}`);
-        lastEvent = eventName;
-      }
+    if (eventName === "response.image_generation_call.partial_image" && data?.partial_image_b64) {
+      callbacks.onPartialImage?.({ b64_json: data.partial_image_b64, index: data.partial_image_index });
+    }
 
-      const now = Date.now();
-      if (callbacks.onProgress && now - lastProgressLogMs > 200) {
-        lastProgressLogMs = now;
-        callbacks.onProgress({ stage: eventName, bytesReceived });
-      }
-
-      if (eventName === "response.image_generation_call.partial_image" && dataStr) {
-        try {
-          const data = JSON.parse(dataStr);
-          if (callbacks.onPartialImage && data?.partial_image_b64) {
-            callbacks.onPartialImage({ b64_json: data.partial_image_b64, index: data.partial_image_index });
-          }
-        } catch {}
-      }
-
-      if (eventName === "response.output_item.done" && dataStr) {
-        try {
-          const data = JSON.parse(dataStr);
-          const item = data?.item;
-          if (item?.type === "image_generation_call" && item.result) {
-            imageB64 = item.result;
-          }
-        } catch {}
-      }
-
-      if ((eventName === "response.completed" || eventName === "response.done") && dataStr) {
-        try {
-          const data = JSON.parse(dataStr);
-          usage = normalizeResponsesUsage(data?.response?.usage ?? data?.usage) || usage;
-        } catch {}
+    const items = eventName === "response.output_item.done" ? [data?.item]
+      : eventName === "response.completed" ? (data?.response?.output || [])
+        : [];
+    for (const item of items) {
+      if (item?.type === "image_generation_call" && item.result) imageB64 = item.result;
+      if (item?.type === "message" && Array.isArray(item.content)) {
+        for (const part of item.content) {
+          const text = part.refusal || part.text;
+          if (typeof text === "string") outputText = `${outputText} ${text}`.trim().slice(0, 1000);
+        }
       }
     }
+
+    if (eventName === "response.completed" || eventName === "response.done") {
+      usage = normalizeResponsesUsage(data?.response?.usage ?? data?.usage) || usage;
+    }
   }
+  if (!imageB64 && outputText) throw new Error(`${CODEX_IMAGE_NO_RESULT_ERROR} ${outputText}`);
   return { imageB64, usage };
 }
 
 // SSE Response that pipes codex progress + partial + done events to client
 function buildSseResponse(providerResponse, log, onSuccess, onUsage) {
+  const abort = new AbortController();
+  let cancelled = false;
   const stream = new ReadableStream({
     async start(controller) {
       const enc = new TextEncoder();
@@ -160,19 +147,24 @@ function buildSseResponse(providerResponse, log, onSuccess, onUsage) {
         const { imageB64: b64, usage } = await parseStream(providerResponse, log, {
           onProgress: (info) => send("progress", info),
           onPartialImage: (info) => send("partial_image", info),
-        });
+        }, abort.signal);
+        if (cancelled) return;
         if (!b64) {
-          send("error", { message: "Codex did not return an image. Account may not be entitled (Plus/Pro required)." });
+          send("error", { message: CODEX_IMAGE_NO_RESULT_ERROR, status: 502 });
         } else {
           if (usage && onUsage) await onUsage(usage);
           if (onSuccess) await onSuccess();
           send("done", { created: nowSec(), data: [{ b64_json: b64 }] });
         }
       } catch (err) {
-        send("error", { message: err?.message || "Stream failed" });
+        if (!cancelled) send("error", { message: err?.message || "Stream failed", status: err?.statusCode || 502, code: err?.code });
       } finally {
-        controller.close();
+        if (!cancelled) controller.close();
       }
+    },
+    cancel() {
+      cancelled = true;
+      abort.abort();
     },
   });
   return new Response(stream, {
@@ -238,7 +230,7 @@ export default {
     }
     const { imageB64: b64, usage } = await parseStream(response, log);
     if (!b64) {
-      throw new Error("Codex did not return an image. Account may not be entitled (Plus/Pro required).");
+      throw new Error(CODEX_IMAGE_NO_RESULT_ERROR);
     }
     if (usage && onUsage) await onUsage(usage);
     return { created: nowSec(), data: [{ b64_json: b64 }] };
