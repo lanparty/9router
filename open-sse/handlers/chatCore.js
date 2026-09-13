@@ -210,7 +210,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     translatedBody = { ...body, model: stripThinkingSuffix(upstreamModel) };
     if (provider === "codex") {
       const suffixThinking = {};
-      applyThinking(sourceFormat, upstreamModel, suffixThinking, provider);
+      // This scratch object is intentionally normalized to the flat OpenAI shape;
+      // the passthrough branch nests the resulting effort on the real body below.
+      applyThinking(FORMATS.OPENAI, upstreamModel, suffixThinking, provider);
       if (suffixThinking.reasoning_effort) {
         const reasoning = translatedBody.reasoning;
         translatedBody.reasoning = {
