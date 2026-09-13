@@ -51,7 +51,7 @@ export async function handleImageGeneration(request) {
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid JSON body");
   }
 
-  return handleImageGenerationBody(request, body);
+  return handleImageGenerationBody(request, { ...body, operation: "generate" });
 }
 
 /**
@@ -59,7 +59,6 @@ export async function handleImageGeneration(request) {
  * Image edits use this seam after normalizing multipart uploads.
  */
 export async function handleImageGenerationBody(request, body) {
-
   const url = new URL(request.url);
   const preferredConnectionId = request.headers.get("x-connection-id") || null;
   const wantsStream = (request.headers.get("accept") || "").includes("text/event-stream");

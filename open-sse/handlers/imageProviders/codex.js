@@ -180,6 +180,7 @@ function buildSseResponse(providerResponse, log, onSuccess, onUsage) {
 
 export default {
   stream: true,
+  supportsEdit: true,
   buildUrl: () => CODEX_RESPONSES_URL,
   buildHeaders: (creds) => {
     const accountId = creds?.providerSpecificData?.chatgptAccountId || decodeAccountId(creds?.idToken);

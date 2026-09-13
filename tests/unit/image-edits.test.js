@@ -32,6 +32,7 @@ describe("OpenAI-compatible image edits", () => {
     }));
 
     expect(body.model).toBe("codex/gpt-5.5-image");
+    expect(body.operation).toBe("edit");
     expect(body.images).toEqual([`data:image/png;base64,${Buffer.from("source").toString("base64")}`]);
   });
 
@@ -127,5 +128,6 @@ describe("OpenAI-compatible image edits", () => {
     expect(response.status).toBe(200);
     expect(generation.handleImageGenerationBody).toHaveBeenCalledTimes(1);
     expect(generation.handleImageGenerationBody.mock.calls[0][1].images).toHaveLength(1);
+    expect(generation.handleImageGenerationBody.mock.calls[0][1].operation).toBe("edit");
   });
 });

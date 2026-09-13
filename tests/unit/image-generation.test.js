@@ -122,6 +122,37 @@ describe("handleImageGenerationCore", () => {
     expect(responseBody.data[0].b64_json).toBe("base64openairesponses");
   });
 
+  it("rejects edit operations on the default OpenAI Images backend", async () => {
+    const result = await handleImageGenerationCore({
+      body: {
+        operation: "edit",
+        prompt: "Keep the product and replace the background",
+        images: ["data:image/png;base64,AAA"],
+      },
+      modelInfo: { provider: "openai", model: "gpt-image-2.5" },
+      credentials: { apiKey: "test-key" },
+      log: null,
+    });
+
+    expect(result).toMatchObject({ success: false, status: 400 });
+    expect(result.error).toContain("imageBackend=images");
+    expect(result.error).toContain("imageBackend=responses");
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects edit operations for adapters that do not declare edit support", async () => {
+    const result = await handleImageGenerationCore({
+      body: { operation: "edit", prompt: "Edit", images: ["data:image/png;base64,AAA"] },
+      modelInfo: { provider: "gemini", model: "gemini-image-preview" },
+      credentials: { apiKey: "test-key" },
+      log: null,
+    });
+
+    expect(result).toMatchObject({ success: false, status: 400 });
+    expect(result.error).toContain("does not support image edits");
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
   it("maps ordered image references to Responses input_image edit input", async () => {
     global.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
       created_at: 1234567891,

@@ -5,6 +5,7 @@ import PropTypes from "prop-types";
 import { Button, Badge, Input, Modal, Select } from "@/shared/components";
 import { AI_PROVIDERS } from "@/shared/constants/providers";
 import { planBulkAdd } from "@/shared/utils/bulkAdd";
+import { mergeImageBackendProviderSpecificData, resolveImageBackend } from "@/shared/utils/imageBackendSettings";
 
 const BULK_PLACEHOLDER = `name1|sk-key1\nname2|sk-key2\nsk-key-only-auto-named`;
 
@@ -29,9 +30,10 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
   const apiKeyOptionalWith = AI_PROVIDERS?.[provider]?.apiKeyOptionalWith || null;
   const providerRegions = AI_PROVIDERS?.[provider]?.regions || null;
   const defaultRegion = AI_PROVIDERS?.[provider]?.defaultRegion || providerRegions?.[0]?.id || "";
-  const imageBackendConfig = AI_PROVIDERS?.[provider]?.imageConfig || null;
+  const providerConfig = AI_PROVIDERS?.[provider] || null;
+  const imageBackendConfig = providerConfig?.imageConfig || null;
   const imageBackendOptions = imageBackendConfig?.backendOptions || null;
-  const defaultImageBackend = imageBackendConfig?.defaultBackend || "images";
+  const defaultImageBackend = resolveImageBackend(providerConfig);
 
   const [formData, setFormData] = useState({
     name: "",
@@ -98,8 +100,8 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     if (providerRegions && region) {
       data.region = region;
     }
-    if (imageBackendOptions && formData.imageBackend) data.imageBackend = formData.imageBackend;
-    return Object.keys(data).length > 0 ? data : undefined;
+    const providerSpecificData = mergeImageBackendProviderSpecificData(data, providerConfig, formData.imageBackend);
+    return Object.keys(providerSpecificData).length > 0 ? providerSpecificData : undefined;
   };
 
   // One place decides whether the credential requirement is met. The button's disabled state and

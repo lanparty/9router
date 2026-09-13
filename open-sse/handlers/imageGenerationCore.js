@@ -52,6 +52,18 @@ export async function handleImageGenerationCore({
     );
   }
 
+  if (body.operation === "edit") {
+    const supportsEdit = typeof adapter.supportsEdit === "function"
+      ? adapter.supportsEdit(model, body, credentials)
+      : adapter.supportsEdit === true;
+    if (!supportsEdit) {
+      const message = typeof adapter.editUnsupportedMessage === "function"
+        ? adapter.editUnsupportedMessage(model, body, credentials)
+        : `Provider '${provider}' does not support image edits`;
+      return createErrorResult(HTTP_STATUS.BAD_REQUEST, message);
+    }
+  }
+
   // Executor-delegating adapters: skip manual URL/headers/body, use the proven executor flow
   if (adapter.useExecutor && adapter.executeViaExecutor) {
     try {

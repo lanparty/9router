@@ -91,6 +91,7 @@ async function parseMultipart(request) {
     images.push(dataUrl);
   }
   body.images = images;
+  body.operation = "edit";
   return body;
 }
 
@@ -108,7 +109,7 @@ async function parseJson(request) {
   }
   const images = collectJsonImages(body);
   if (images.length === 0) throw new Error("Missing required field: image");
-  return { ...body, images, image: undefined };
+  return { ...body, images, image: undefined, operation: "edit" };
 }
 
 export async function parseImageEditRequest(request) {

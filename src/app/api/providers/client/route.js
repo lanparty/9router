@@ -29,7 +29,7 @@ function maskName(name) {
   return name;
 }
 
-function sanitize(c) {
+export function sanitizeProviderConnection(c) {
   const safe = {};
   for (const f of SAFE_FIELDS) if (c[f] !== undefined) safe[f] = c[f];
   if (safe.name) safe.name = maskName(safe.name);
@@ -104,7 +104,7 @@ export async function GET(request) {
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     const currentPage = Math.min(page, totalPages);
     const offset = (currentPage - 1) * pageSize;
-    const pageConnections = sortedConnections.slice(offset, offset + pageSize).map(sanitize);
+    const pageConnections = sortedConnections.slice(offset, offset + pageSize).map(sanitizeProviderConnection);
 
     return NextResponse.json({
       connections: pageConnections,

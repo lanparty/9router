@@ -112,6 +112,13 @@ function normalizeResponsesBody(responseBody) {
 export default function createOpenAIAdapter(providerId) {
   const cfg = imageCfg(providerId);
   return {
+    supportsEdit: (_model, _body, credentials) => resolveBackend(providerId, credentials) === RESPONSES_BACKEND,
+    editUnsupportedMessage: (_model, _body, credentials) => {
+      const backend = resolveBackend(providerId, credentials);
+      return providerId === "openai" && backend === IMAGES_BACKEND
+        ? "OpenAI image edits are not supported with imageBackend=images; select imageBackend=responses"
+        : `Provider '${providerId}' does not support image edits`;
+    },
     buildUrl: (_model, credentials) => resolveBackend(providerId, credentials) === RESPONSES_BACKEND
       ? cfg.responsesUrl : cfg.baseUrl,
     buildHeaders: (creds) => {

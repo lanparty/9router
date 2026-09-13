@@ -8,6 +8,7 @@ import Button from "@/shared/components/Button";
 import Badge from "@/shared/components/Badge";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import Select from "@/shared/components/Select";
+import { mergeImageBackendProviderSpecificData, resolveImageBackend } from "@/shared/utils/imageBackendSettings";
 
 export default function EditConnectionModal({ isOpen, connection, proxyPools, onSave, onClose }) {
   const [formData, setFormData] = useState({
@@ -68,7 +69,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
         setRegion(savedRegion);
       }
       if (providerCfg?.imageConfig?.backendOptions) {
-        setImageBackend(connection.providerSpecificData?.imageBackend || providerCfg.imageConfig.defaultBackend || "images");
+        setImageBackend(resolveImageBackend(providerCfg, connection.providerSpecificData));
       } else {
         setImageBackend("images");
       }
@@ -90,9 +91,13 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
 
   // Preserve existing provider-specific fields when changing a connection option.
   const buildConnectionProviderSpecificData = () => {
-    const data = { ...(connection?.providerSpecificData || {}) };
+    const providerConfig = AI_PROVIDERS?.[connection?.provider] || null;
+    const data = mergeImageBackendProviderSpecificData(
+      connection?.providerSpecificData,
+      providerConfig,
+      imageBackend,
+    );
     if (providerRegions && region) data.region = region;
-    if (imageBackendOptions && imageBackend) data.imageBackend = imageBackend;
     return data;
   };
 
