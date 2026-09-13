@@ -60,6 +60,45 @@ export function stripContinuityFields(body) {
   return body;
 }
 
+// Multi-endpoint providers: pick the transport matching sourceFormat for zero translation.
+// OpenAI GPT-5.6 is the exception: it requires Responses even when the client sends
+// Chat Completions, so it is forced onto the Responses transport.
+export function resolveChatRouting(provider, model, sourceFormat, credentials = null) {
+  const alias = PROVIDER_ID_TO_ALIAS[provider] || provider;
+  const modelTargetFormat = getModelTargetFormat(alias, model);
+  const modelSupportedFormats = getModelSupportedFormats(alias, model);
+  const forceModelTargetFormat =
+    alias === "openai" && /^gpt-5\.6(?:$|-)/i.test(model)
+      ? FORMATS.OPENAI_RESPONSES
+      : null;
+  const runtimeTransport = resolveTransport(provider, forceModelTargetFormat || sourceFormat);
+  // Per-model guard: when a model declares supportedFormats, only use the
+  // sourceFormat-matched transport if that format is declared (opencode-go models
+  // differ — kimi/glm only do /chat/completions). Undeclared models keep the
+  // upstream default (use the transport), preserving behavior for glm/deepseek/...
+  // When the client's wire format is NOT among the model's supportedFormats, fall
+  // back to the transport for the model's declared targetFormat so the URL always
+  // matches the translated body. Without this, a Responses-only model (e.g. Muse
+  // Spark: supportedFormats ["openai-responses"]) requested by an OpenAI client is
+  // translated to the Responses body (`input`) yet POSTed to the default Chat
+  // Completions URL, and upstream rejects it: "unknown parameter `input`".
+  let useTransport;
+  if (forceModelTargetFormat) {
+    useTransport = runtimeTransport;
+  } else if (!modelSupportedFormats || modelSupportedFormats.includes(sourceFormat)) {
+    useTransport = runtimeTransport;
+  } else {
+    useTransport = modelTargetFormat ? resolveTransport(provider, modelTargetFormat) : null;
+  }
+  // A source-format-matched endpoint keeps the request lossless. Prefer it
+  // over a model-level targetFormat, which is only the fallback for clients
+  // whose wire format has no supported transport (for example MiniMax-M3:
+  // OpenAI clients should stay on /chat/completions; other clients can fall
+  // back to its declared Claude target).
+  const targetFormat = forceModelTargetFormat || useTransport?.format || modelTargetFormat || getTargetFormat(provider, credentials);
+  return { alias, runtimeTransport, useTransport, targetFormat };
+}
+
 export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, providerOverrides }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
@@ -79,35 +118,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const bypassResponse = handleBypassRequest(body, model, userAgent, ccFilterNaming);
   if (bypassResponse) return bypassResponse;
 
-  const alias = PROVIDER_ID_TO_ALIAS[provider] || provider;
-  const modelTargetFormat = getModelTargetFormat(alias, model);
-  // Multi-endpoint providers: pick transport matching sourceFormat → zero translation.
-  // Per-model guard: only use the transport when the model declares support for that
-  // sourceFormat — opencode-go models differ in endpoint support (kimi/glm only do
-  // /chat/completions), so without this guard a claude-format request would wrongly
-  // route kimi to /messages.
-  const modelSupportedFormats = getModelSupportedFormats(alias, model);
-  const runtimeTransport = resolveTransport(provider, sourceFormat);
-  // Per-model guard: when a model declares supportedFormats, only use the
-  // sourceFormat-matched transport if that format is declared (opencode-go models
-  // differ — kimi/glm only do /chat/completions). Undeclared models keep the
-  // upstream default (use the transport), preserving behavior for glm/deepseek/...
-  // When the client's wire format is NOT among the model's supportedFormats, fall
-  // back to the transport for the model's declared targetFormat so the URL always
-  // matches the translated body. Without this, a Responses-only model (e.g. Muse
-  // Spark: supportedFormats ["openai-responses"]) requested by an OpenAI client is
-  // translated to the Responses body (`input`) yet POSTed to the default Chat
-  // Completions URL, and upstream rejects it: "unknown parameter `input`".
-  const modelTargetTransport = modelTargetFormat ? resolveTransport(provider, modelTargetFormat) : null;
-  const useTransport = (!modelSupportedFormats || modelSupportedFormats.includes(sourceFormat))
-    ? runtimeTransport
-    : modelTargetTransport;
-  // A source-format-matched endpoint keeps the request lossless. Prefer it
-  // over a model-level targetFormat, which is only the fallback for clients
-  // whose wire format has no supported transport (for example MiniMax-M3:
-  // OpenAI clients should stay on /chat/completions; other clients can fall
-  // back to its declared Claude target).
-  const targetFormat = useTransport?.format || modelTargetFormat || getTargetFormat(provider, credentials);
+  const { alias, useTransport, targetFormat } = resolveChatRouting(provider, model, sourceFormat, credentials);
   if (useTransport && credentials) credentials.runtimeTransport = useTransport;
   const stripList = getModelStrip(alias, model);
   const upstreamModel = getModelUpstreamId(alias, model);
