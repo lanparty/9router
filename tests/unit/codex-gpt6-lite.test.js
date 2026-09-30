@@ -5,12 +5,20 @@ import { getModelsByProviderId } from "../../open-sse/config/providerModels.js";
 import { getCapabilitiesForModel } from "../../open-sse/providers/capabilities.js";
 import { getPricingForModel } from "../../open-sse/providers/pricing.js";
 import { getThinkingLevels } from "../../open-sse/providers/thinkingLevels.js";
+import codexProvider from "../../open-sse/providers/registry/codex.js";
 import * as proxyFetchModule from "../../open-sse/utils/proxyFetch.js";
 
+const CODEX_CLIENT = codexProvider.transport;
 const credentials = { connectionId: "fixture", accessToken: "fixture-token" };
 afterEach(() => vi.restoreAllMocks());
 
 describe("Codex GPT-6 Sol/Luna transport", () => {
+  it("advertises a client version new enough for gpt-6.1-sol (>= 0.159.0)", () => {
+    const [major, minor] = CODEX_CLIENT.headers.version.split(".").map(Number);
+    expect(major === 0 ? minor : Infinity).toBeGreaterThanOrEqual(159);
+    expect(CODEX_CLIENT.headers["User-Agent"]).toContain(CODEX_CLIENT.headers.version);
+  });
+
   it.each(["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"])("lists %s with Codex capabilities", (model) => {
     const entry = getModelsByProviderId("codex").find((item) => item.id === model);
     expect(entry?.responsesLite).toBe(true);
@@ -198,8 +206,8 @@ describe("Codex GPT-6 Sol/Luna transport", () => {
     const body = JSON.parse(options.body);
     expect(url).toBe("https://chatgpt.com/backend-api/codex/responses");
     expect(options.headers["x-openai-internal-codex-responses-lite"]).toBe("true");
-    expect(options.headers.version).toBe("0.159.0");
-    expect(options.headers["User-Agent"]).toBe("codex_cli_rs/0.159.0");
+    expect(options.headers.version).toBe(CODEX_CLIENT.headers.version);
+    expect(options.headers["User-Agent"]).toBe(`codex_cli_rs/${CODEX_CLIENT.headers.version}`);
     expect(body.model).toBe("gpt-6-luna");
     expect(body.instructions).toBe("");
     expect(body.input[0].type).toBe("additional_tools");

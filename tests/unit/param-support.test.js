@@ -21,6 +21,24 @@ describe("stripUnsupportedParams", () => {
     expect(body.messages[0].content).toBe("hello world");
   });
 
+  it.each(["gpt-6-sol", "gpt-6.1-sol", "gpt-5.5", "o3-mini"])("renames max_tokens for OpenAI %s", (model) => {
+    const body = { max_tokens: 512, temperature: 1 };
+
+    stripUnsupportedParams("openai", model, body);
+
+    expect(body).toEqual({ max_completion_tokens: 512, temperature: 1 });
+  });
+
+  it("keeps an explicit max_completion_tokens and leaves older OpenAI models alone", () => {
+    const explicit = { max_tokens: 512, max_completion_tokens: 900 };
+    stripUnsupportedParams("openai", "gpt-6-sol", explicit);
+    expect(explicit).toEqual({ max_completion_tokens: 900 });
+
+    const legacy = { max_tokens: 512 };
+    stripUnsupportedParams("openai", "gpt-4o", legacy);
+    expect(legacy).toEqual({ max_tokens: 512 });
+  });
+
   it("still drops unsupported GitHub model params", () => {
     const body = { temperature: 0.7, top_p: 1 };
 

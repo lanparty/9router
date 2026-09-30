@@ -21,6 +21,8 @@ const STRIP_RULES = [
   // "integer above maximum value, expected <= 32768". Pin an explicit endpoint cap;
   // min() with the model ceiling still applies if a variant's own limit is lower.
   { provider: "volcengine-ark", match: /kimi/i, maxOutputCap: 32768, clampToModelMaxOutput: true },
+  // OpenAI rejects max_tokens on gpt-5+/o-series ("Use 'max_completion_tokens' instead").
+  { provider: "openai", match: /^(gpt-[5-9]|o[1-9])/i, rename: { max_tokens: "max_completion_tokens" } },
   // Strict OpenAI-compatible validators reject unknown assistant-message fields.
   // Clients that talk to reasoning models (e.g. Hermes) echo the prior turn's
   // reasoning back on every assistant message; Groq answers 400 and Mistral 422
@@ -61,6 +63,11 @@ export function stripUnsupportedParams(provider, model, body) {
     if (!matches(rule, model)) continue;
     for (const key of rule.drop || []) {
       if (body[key] !== undefined) delete body[key];
+    }
+    for (const [from, to] of Object.entries(rule.rename || {})) {
+      if (body[from] === undefined) continue;
+      if (body[to] === undefined) body[to] = body[from];
+      delete body[from];
     }
     // Per-message field drop (assistant turns only — that is where clients replay reasoning).
     if (Array.isArray(rule.dropMessageFields) && Array.isArray(body.messages)) {
