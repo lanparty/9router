@@ -17,8 +17,12 @@ export const COLORS = {
   cyan: "\x1b[36m"
 };
 
-// Buffer tokens to prevent context errors
-const BUFFER_TOKENS = 2000;
+// Buffer tokens added to client-facing usage to prevent context errors.
+// Override with USAGE_BUFFER_TOKENS (e.g. 0 when a downstream bills from usage).
+const BUFFER_TOKENS = (() => {
+  const v = Number.parseInt(process.env.USAGE_BUFFER_TOKENS ?? "", 10);
+  return Number.isFinite(v) && v >= 0 ? v : 2000;
+})();
 
 // Get HH:MM:SS timestamp
 function getTimeString() {
@@ -108,7 +112,23 @@ export function filterUsageForFormat(usage, targetFormat) {
     fields = formatFields.default;
   }
 
-  return pickFields(fields);
+  const filtered = pickFields(fields);
+
+  // Claude-sourced usage carries cache as cache_read/cache_creation_input_tokens,
+  // which the OpenAI field list drops. Surface them as prompt_tokens_details so
+  // OpenAI-format clients can still tell cache hits from fresh input.
+  if (fields === formatFields.default && !filtered.prompt_tokens_details) {
+    const cacheRead = usage.cache_read_input_tokens || 0;
+    const cacheCreate = usage.cache_creation_input_tokens || 0;
+    if (cacheRead > 0 || cacheCreate > 0) {
+      filtered.prompt_tokens_details = {
+        ...(cacheRead > 0 ? { cached_tokens: cacheRead } : {}),
+        ...(cacheCreate > 0 ? { cache_creation_tokens: cacheCreate } : {})
+      };
+    }
+  }
+
+  return filtered;
 }
 
 /**
