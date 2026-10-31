@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import { stripUnsupportedParams } from "../../open-sse/translator/concerns/paramSupport.js";
+import { DefaultExecutor } from "../../open-sse/executors/default.js";
 
 describe("stripUnsupportedParams", () => {
   it("flattens Cloudflare AI OpenAI content-part arrays", () => {
@@ -27,16 +28,6 @@ describe("stripUnsupportedParams", () => {
     stripUnsupportedParams("openai", model, body);
 
     expect(body).toEqual({ max_completion_tokens: 512, temperature: 1 });
-  });
-
-  it("keeps an explicit max_completion_tokens and leaves older OpenAI models alone", () => {
-    const explicit = { max_tokens: 512, max_completion_tokens: 900 };
-    stripUnsupportedParams("openai", "gpt-6-sol", explicit);
-    expect(explicit).toEqual({ max_completion_tokens: 900 });
-
-    const legacy = { max_tokens: 512 };
-    stripUnsupportedParams("openai", "gpt-4o", legacy);
-    expect(legacy).toEqual({ max_tokens: 512 });
   });
 
   it("still drops unsupported GitHub model params", () => {
@@ -115,6 +106,29 @@ describe("stripUnsupportedParams", () => {
     expect(body.messages[0].reasoning_content).toBe("thinking...");
   });
 
+  it("normalizes NVIDIA reasoning aliases before DeepSeek placeholder injection", () => {
+    const body = {
+      messages: [
+        { role: "assistant", content: "", reasoning: "alias", reasoning_content: "canonical" },
+        { role: "assistant", content: "", reasoning: "alias only" },
+        { role: "assistant", content: "", reasoning_content: "canonical only" },
+      ],
+    };
+
+    const transformed = new DefaultExecutor("nvidia").transformRequest(
+      "deepseek-ai/deepseek-v4-pro",
+      body,
+      true,
+      {},
+    );
+
+    expect(transformed.messages).toEqual([
+      { role: "assistant", content: "", reasoning_content: "canonical" },
+      { role: "assistant", content: "", reasoning_content: "alias only" },
+      { role: "assistant", content: "", reasoning_content: "canonical only" },
+    ]);
+  });
+
   it("drops response_format for OpenCode Go's deepseek family (both json_schema and json_object)", () => {
     const formats = [
       { type: "json_schema", json_schema: { name: "session_title", strict: true, schema: { type: "object" } } },
@@ -153,5 +167,29 @@ describe("stripUnsupportedParams", () => {
       stripUnsupportedParams(provider, model, body);
       expect(body.response_format).toBe(response_format);
     }
+  });
+
+  it("renames max_tokens to max_completion_tokens for the openai provider", () => {
+    const body = { max_tokens: 50, temperature: 1 };
+
+    stripUnsupportedParams("openai", "gpt-6-luna", body);
+
+    expect(body).toEqual({ max_completion_tokens: 50, temperature: 1 });
+  });
+
+  it("keeps an explicit max_completion_tokens when both are sent to openai", () => {
+    const body = { max_tokens: 50, max_completion_tokens: 80 };
+
+    stripUnsupportedParams("openai", "gpt-6-luna", body);
+
+    expect(body).toEqual({ max_completion_tokens: 80 });
+  });
+
+  it("leaves max_tokens untouched for other providers", () => {
+    const body = { max_tokens: 50 };
+
+    stripUnsupportedParams("groq", "qwen/qwen3.6-27b", body);
+
+    expect(body).toEqual({ max_tokens: 50 });
   });
 });
