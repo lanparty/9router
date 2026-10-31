@@ -355,8 +355,9 @@ describe("transport-declared thinkingFormat (Responses endpoints)", () => {
     expect(out.reasoning_effort).toBeUndefined();
   });
 
-  it("a provider without the declaration keeps its existing Responses behaviour (control)", () => {
+  it("a provider without the declaration still gets nested Responses reasoning (control)", () => {
     const out = apply("openai-responses", "oc/space-bunny-free", chatBody("high"), "oc");
-    expect(out.reasoning_effort).toBe("high");
+    expect(out.reasoning_effort).toBeUndefined();
+    expect(out.reasoning?.effort).toBe("high");
   });
 });
