@@ -1,7 +1,8 @@
-// Codex (paid ChatGPT plans: Go/Plus/Pro/...) image generation via Responses API + SSE
+// Codex OAuth image generation: native Images API for GPT Image, Responses SSE for edits.
 import { randomUUID } from "node:crypto";
 import { nowSec } from "./_base.js";
 import { PROVIDERS } from "../../config/providers.js";
+import { PROVIDER_MEDIA } from "../../providers/index.js";
 import { CODEX_CLI_VERSION } from "../../config/appConstants.js";
 import {
   CODEX_IMAGE_NO_RESULT_ERROR,
@@ -10,6 +11,11 @@ import {
 } from "../../utils/codexSse.js";
 
 const CODEX_RESPONSES_URL = PROVIDERS["codex"].baseUrl;
+// Codex OAuth image generation uses the native Images endpoint. The Responses
+// image_generation path has returned unsupported `complexity=medium` errors for
+// GPT Image models. Native has ignored explicit n/size/format controls,
+// so preserve Responses for those requests, edits, and older virtual models.
+const CODEX_IMAGES_GENERATIONS_URL = PROVIDER_MEDIA.codex.imageConfig.baseUrl;
 const CODEX_USER_AGENT = `codex_cli_rs/${CODEX_CLI_VERSION}`;
 const CODEX_ORIGINATOR = "codex_cli_rs";
 const CODEX_MODEL_SUFFIX = "-image";
@@ -22,6 +28,8 @@ const CODEX_TOOL_IMAGE_MODELS = new Set([
   "gpt-image-2.5",
   "gpt-image-2.5-flare",
   "gpt-image-2.5-sunburst",
+  "gpt-image-2.6-flare",
+  "gpt-image-2.6-sunburst",
 ]);
 
 function decodeOpenAIAuthClaims(token) {
@@ -60,6 +68,36 @@ function resolveCodexImageModels(model) {
   return { responsesModel: stripImageSuffix(model), toolModel: null };
 }
 
+function hasImageRefs(body) {
+  return Boolean(body?.image || (Array.isArray(body?.images) && body.images.length > 0));
+}
+
+function shouldUseNativeGeneration(model, body = {}) {
+  // Native Codex has been observed returning one auto-sized PNG even when n,
+  // size, or output_format requests something else. Do not silently reroute
+  // those requests to a transport that cannot honor their output controls.
+  return CODEX_TOOL_IMAGE_MODELS.has(model)
+    && !hasImageRefs(body)
+    && (body.n == null || body.n === 1)
+    && (!body.size || body.size === "auto")
+    && (!body.output_format || body.output_format.toLowerCase() === "png")
+    && (!body.background || ["auto", "opaque"].includes(body.background))
+    && (!body.quality || ["auto", "low", "medium", "high"].includes(body.quality))
+    && body.output_compression == null;
+}
+
+function buildNativeGenerationBody(model, body) {
+  return {
+    model,
+    prompt: body.prompt,
+    n: 1,
+    size: "auto",
+    quality: body.quality || "auto",
+    background: body.background || "auto",
+    output_format: "png",
+  };
+}
+
 function toDataUrl(input) {
   if (!input || typeof input !== "string") return null;
   if (/^data:image\//i.test(input) || /^https?:\/\//i.test(input)) return input;
@@ -75,6 +113,18 @@ function buildContent(prompt, refs, detail = CODEX_REF_DETAIL) {
   });
   content.push({ type: "input_text", text: prompt });
   return content;
+}
+
+function extractStreamError(data) {
+  if (!data) return null;
+  if (typeof data === "string") return data;
+  if (data.error?.message) return data.error.message;
+  if (data.response?.error?.message) return data.response.error.message;
+  if (data.item?.error?.message) return data.item.error.message;
+  if (data.response?.status_details?.error?.message) return data.response.status_details.error.message;
+  if (typeof data.error === "string") return data.error;
+  if (typeof data.message === "string") return data.message;
+  return null;
 }
 
 function normalizeResponsesUsage(raw) {
@@ -95,9 +145,20 @@ function normalizeResponsesUsage(raw) {
   return usage;
 }
 
+function nativeImageSseResponse(result) {
+  return new Response(`event: done\ndata: ${JSON.stringify(result)}\n\n`, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+}
+
 // Parse Codex SSE stream → final base64 image. Optional callbacks for client streaming.
 async function parseStream(response, log, callbacks = {}, signal) {
   let imageB64 = null;
+  let upstreamError = null;
   let outputText = "";
   let lastEvent = null;
   let bytesReceived = 0;
@@ -125,16 +186,25 @@ async function parseStream(response, log, callbacks = {}, signal) {
       callbacks.onPartialImage?.({ b64_json: data.partial_image_b64, index: data.partial_image_index });
     }
 
+    if (eventName === "response.output_text.delta" && typeof data?.delta === "string") {
+      outputText = `${outputText}${data.delta}`.slice(0, 1000);
+    }
+
     const items = eventName === "response.output_item.done" ? [data?.item]
       : eventName === "response.completed" ? (data?.response?.output || [])
         : [];
     for (const item of items) {
-      if (item?.type === "image_generation_call" && item.result) imageB64 = item.result;
+      if (item?.type === "image_generation_call") {
+        if (item.result) imageB64 = item.result;
+        else upstreamError = extractStreamError(item) || upstreamError;
+      }
       if (item?.type === "message" && Array.isArray(item.content)) {
-        for (const part of item.content) {
-          const text = part.refusal || part.text;
-          if (typeof text === "string") outputText = `${outputText} ${text}`.trim().slice(0, 1000);
-        }
+        const text = item.content
+          .map((part) => (typeof part === "string" ? part : part?.refusal || part?.text || part?.output_text))
+          .filter((t) => typeof t === "string")
+          .join(" ")
+          .trim();
+        if (text) outputText = text.slice(0, 1000);
       }
     }
 
@@ -142,8 +212,10 @@ async function parseStream(response, log, callbacks = {}, signal) {
       usage = normalizeResponsesUsage(data?.response?.usage ?? data?.usage) || usage;
     }
   }
-  if (!imageB64 && outputText) throw new Error(`${CODEX_IMAGE_NO_RESULT_ERROR} ${outputText}`);
-  return { imageB64, usage };
+  if (!imageB64 && !upstreamError && outputText.trim()) {
+    upstreamError = `${CODEX_IMAGE_NO_RESULT_ERROR} ${outputText.trim()}`;
+  }
+  return { imageB64, usage, error: upstreamError };
 }
 
 // SSE Response that pipes codex progress + partial + done events to client
@@ -157,20 +229,26 @@ function buildSseResponse(providerResponse, log, onSuccess, onUsage) {
         controller.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
       };
       try {
-        const { imageB64: b64, usage } = await parseStream(providerResponse, log, {
+        const { imageB64: b64, usage, error: upstreamError } = await parseStream(providerResponse, log, {
           onProgress: (info) => send("progress", info),
           onPartialImage: (info) => send("partial_image", info),
         }, abort.signal);
         if (cancelled) return;
         if (!b64) {
-          send("error", { message: CODEX_IMAGE_NO_RESULT_ERROR, status: 502 });
+          send("error", { message: upstreamError || CODEX_IMAGE_NO_RESULT_ERROR, status: 502 });
         } else {
           if (usage && onUsage) await onUsage(usage);
           if (onSuccess) await onSuccess();
           send("done", { created: nowSec(), data: [{ b64_json: b64 }] });
         }
       } catch (err) {
-        if (!cancelled) send("error", { message: err?.message || "Stream failed", status: err?.statusCode || 502, code: err?.code });
+        if (!cancelled) send("error", {
+          message: err?.message || "Stream failed",
+          ...(err?.code ? { code: err.code } : {}),
+          ...(err?.type ? { type: err.type } : {}),
+          ...(err?.param ? { param: err.param } : {}),
+          status: err?.statusCode || 502,
+        });
       } finally {
         if (!cancelled) controller.close();
       }
@@ -198,11 +276,15 @@ export default {
   // (upstream returns 400 "Tool choice 'image_generation' must be specified with 'tools' parameter").
   // Unknown plan is allowed so accounts without plan claims keep working.
   canUseCredentials: (creds) => resolveChatgptPlanType(creds) !== "free",
-  buildUrl: () => CODEX_RESPONSES_URL,
-  buildHeaders: (creds) => {
+  buildUrl: (model, creds, body) => shouldUseNativeGeneration(model, body)
+    ? CODEX_IMAGES_GENERATIONS_URL
+    : CODEX_RESPONSES_URL,
+  buildHeaders: (creds, requestBody) => {
     const accountId = creds?.providerSpecificData?.chatgptAccountId || decodeAccountId(creds?.idToken);
     return {
-      "accept": "text/event-stream, application/json",
+      "accept": requestBody?.prompt && !requestBody?.input
+        ? "application/json"
+        : "text/event-stream, application/json",
       "authorization": `Bearer ${creds?.accessToken || ""}`,
       "chatgpt-account-id": accountId || "",
       "content-type": "application/json",
@@ -214,6 +296,8 @@ export default {
     };
   },
   buildBody: (model, body) => {
+    if (shouldUseNativeGeneration(model, body)) return buildNativeGenerationBody(model, body);
+
     const refs = [];
     if (Array.isArray(body.images)) body.images.forEach((i) => { const u = toDataUrl(i); if (u) refs.push(u); });
     const single = toDataUrl(body.image);
@@ -227,6 +311,8 @@ export default {
     }
     if (body.size && body.size !== "") imgTool.size = body.size;
     if (body.quality && body.quality !== "") imgTool.quality = body.quality;
+    // The ChatGPT Codex backend currently rejects every explicit complexity level.
+    // Omit it so GPT Image 2.6 uses its supported upstream default.
     if (body.background && body.background !== "") imgTool.background = body.background;
     return {
       model: responsesModel,
@@ -238,17 +324,44 @@ export default {
       prompt_cache_key: randomUUID(),
       stream: true,
       store: false,
-      reasoning: toolModel ? { effort: "medium", summary: "auto" } : null,
+      reasoning: null,
     };
   },
   // Custom: codex parses SSE → either pipe to client or collect b64
-  async parseResponse(response, { log, streamToClient, onRequestSuccess, onUsage }) {
+  async parseResponse(response, { log, streamToClient, onRequestSuccess, onUsage, requestBody }) {
+    if (requestBody?.prompt && !requestBody?.input) {
+      let payload;
+      try {
+        payload = await response.json();
+      } catch {
+        throw new Error("Codex Images API returned invalid JSON.");
+      }
+      const data = Array.isArray(payload?.data) ? payload.data : [];
+      if (!data.some((item) => item?.b64_json || item?.url)) {
+        const error = payload?.error || {};
+        const err = new Error(error.message || "Codex Images API returned no image.");
+        for (const key of ["code", "type", "param"]) {
+          if (typeof error[key] === "string") err[key] = error[key];
+        }
+        throw err;
+      }
+      const result = { created: payload.created || nowSec(), data };
+      const usage = normalizeResponsesUsage(payload.usage);
+      if (streamToClient) {
+        if (usage && onUsage) await onUsage(usage);
+        if (onRequestSuccess) await onRequestSuccess();
+        return { sseResponse: nativeImageSseResponse(result) };
+      }
+      if (usage && onUsage) await onUsage(usage);
+      return result;
+    }
+
     if (streamToClient) {
       return { sseResponse: buildSseResponse(response, log, onRequestSuccess, onUsage) };
     }
-    const { imageB64: b64, usage } = await parseStream(response, log);
+    const { imageB64: b64, usage, error: upstreamError } = await parseStream(response, log);
     if (!b64) {
-      throw new Error(CODEX_IMAGE_NO_RESULT_ERROR);
+      throw new Error(upstreamError || CODEX_IMAGE_NO_RESULT_ERROR);
     }
     if (usage && onUsage) await onUsage(usage);
     return { created: nowSec(), data: [{ b64_json: b64 }] };

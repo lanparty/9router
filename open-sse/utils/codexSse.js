@@ -19,6 +19,9 @@ export function codexEventError(event, data) {
   error.code = typeof detail?.code === "string"
     ? detail.code
     : typeof data?.response?.code === "string" ? data.response.code : data?.code;
+  for (const key of ["type", "param"]) {
+    if (typeof detail?.[key] === "string") error[key] = detail[key];
+  }
   const explicitStatus = Number(
     detail?.status_code
       ?? detail?.statusCode
