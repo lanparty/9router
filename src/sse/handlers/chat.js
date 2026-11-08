@@ -16,6 +16,7 @@ import { getTransform as getPxpipeTransform } from "@/lib/pxpipe/loader.js";
 import { appendPxpipeEvent } from "@/lib/pxpipe/events.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { upstreamResponseHeaders } from "open-sse/utils/upstreamHeaders.js";
+import { upstreamErrorFromResult, rememberUpstreamError, forgetUpstreamError, pickUpstreamError, upstreamErrorResponse } from "../services/upstreamErrors.js";
 import { handleComboChat, handleFusionChat, detectRequiredCapabilities } from "open-sse/services/combo.js";
 import { augmentModelsWithCapacityAdapter, withCapacityAdapterStripping, getActiveAdapterStrategy } from "open-sse/services/capacityAdapter.js";
 import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
@@ -281,6 +282,11 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {
+      const upstream = pickUpstreamError(provider, model);
+      if (upstream) {
+        log.warn("CHAT", `[${provider}/${model}] all accounts unavailable → replay upstream ${upstream.status}`);
+        return upstreamErrorResponse(upstream);
+      }
       if (credentials?.allRateLimited) {
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = HTTP_STATUS.SERVICE_UNAVAILABLE;
@@ -352,6 +358,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       },
       onRequestSuccess: async () => {
         await clearAccountError(credentials.connectionId, credentials, model);
+        forgetUpstreamError(provider, model, credentials.connectionId);
         // "Consecutive" strikes: a success clears the breaker for this pair.
         clearAntigravityStrikes(credentials.connectionId, model);
       }
@@ -372,9 +379,12 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
     // Exhausted Antigravity model is blocked only in RAM cache until upstream resetAt.
     // Do not persist a modelLock_* for this path.
-    const shouldFallback = provider === "antigravity" && quotaResetMs
-      ? true
-      : (await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, resetsAtMs)).shouldFallback;
+    const fallback = provider === "antigravity" && quotaResetMs
+      ? { shouldFallback: true, cooldownMs: quotaResetMs - Date.now() }
+      : await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, resetsAtMs);
+    const shouldFallback = fallback.shouldFallback;
+    const upstream = upstreamErrorFromResult(provider, result);
+    if (upstream && shouldFallback) rememberUpstreamError(provider, model, credentials.connectionId, upstream, Date.now() + fallback.cooldownMs);
 
     if (shouldFallback) {
       log.warn("FALLBACK", `⇄ ACC:${credentials.connectionName} UNAVAILABLE (${result.status}) → NEXT ACCOUNT`);
@@ -385,6 +395,6 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       continue;
     }
 
-    return result.response;
+    return upstream ? upstreamErrorResponse(upstream) : result.response;
   }
 }

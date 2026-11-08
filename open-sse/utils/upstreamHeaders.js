@@ -10,3 +10,13 @@ export function upstreamResponseHeaders(headers) {
   });
   return out;
 }
+
+// Codex CLI reads its quota snapshot (x-codex-*) and request ids from error responses.
+export function codexErrorHeaders(headers) {
+  const out = upstreamResponseHeaders(headers);
+  headers?.forEach?.((value, name) => {
+    const key = name.toLowerCase();
+    if (key.startsWith("x-codex-") || key === "x-request-id" || key === "x-oai-request-id") out[key] = value;
+  });
+  return out;
+}
